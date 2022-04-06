@@ -63,6 +63,7 @@ type MAIN struct {
 	preHash       string
 	con           net.Conn
 	isAllSetup    bool
+	CCDB          map[string]int
 }
 
 // Used to send and receive data from Engine.
@@ -147,12 +148,12 @@ func (s *Server) defaultSetter() {
 
 // create a connection with engine and athenticate it by sharing key.
 func connectToEngine(sMain *MAIN) {
+	fmt.Println("Address: ", sMain.server.Saddress+":"+sMain.server.Sport)
 	con, err := net.Dial("tcp", sMain.server.Saddress+":"+sMain.server.Sport)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-
 	sMain.isAllSetup = false
 	sMain.upgradedAuthenticator(con)
 }
@@ -190,6 +191,7 @@ func (s *Server) Start(engineLoc string) MAIN {
 	// creating a internal record struct
 	var sMain MAIN
 	sMain.server = s
+	sMain.CCDB = make(map[string]int)
 
 	// connecting with engine
 	connectToEngine(&sMain)
@@ -343,6 +345,35 @@ func (m *MAIN) upgradedAuthenticator(conn net.Conn) {
 	}
 }
 
+// Listen for the data that is comming from the Engine
+// It works in a way that it takes three arguments, channle, fn, args.
+// Most important is fn, the function (should be of type Func), It will
+// every time it reads new data from Engine.
+// Parameters:
+// 		channel (string) : channel on which it will read the data
+// 		fn (Func) : fn is function of type Func which will treger
+// 			every time a new data is read.
+// 		args ([]string) : optional argument for the fn function,
+// 			if no argument is needed it should be nil.
+func (m *MAIN) Listen(channel string, fn Func, args []string) {
+
+	m.server.Hstruct._listenList[channel] = fn
+}
+
+// It start the server and it should be called at end of the program
+// means it should be called when you are assured that all the pre-
+// requirements are being setup and server is ready to run.
+// It is blocking in nature that means it will force the server
+// to run forever.
+func (m *MAIN) Run() {
+	fmt.Println("[ Process ID: ", os.Getpid(), " ]")
+	fmt.Println("shiSock engine is Started on: {", m.server.Saddress, ":", m.server.Sport, "}")
+
+	for {
+
+	}
+}
+
 // Authenticate the Server and create a secured connection with Engine.
 
 // Sends data to the client using the client name and channel
@@ -389,38 +420,54 @@ func (m *MAIN) Send(name string, channel string, data string) (int, error) {
 	}
 }
 
-// Listen for the data that is comming from the Engine
-// It works in a way that it takes three arguments, channle, fn, args.
-// Most important is fn, the function (should be of type Func), It will
-// every time it reads new data from Engine.
-// Parameters:
-// 		channel (string) : channel on which it will read the data
-// 		fn (Func) : fn is function of type Func which will treger
-// 			every time a new data is read.
-// 		args ([]string) : optional argument for the fn function,
-// 			if no argument is needed it should be nil.
-func (m *MAIN) Listen(channel string, fn Func, args []string) {
+func (m *MAIN) Close(name string) {
+	// function for closing the connection between client and engine
+	var res Transport
+	res.Type = "ECC-CLOSE"
+	res.Channel = "INTERNAL"
+	res.Name = name
+	res.Data = "close the engine and client connection"
+	res.DateTime = time.Now().String()
 
-	m.server.Hstruct._listenList[channel] = fn
+	jsonres, err := json.Marshal(&res)
+	handleError(err, "")
+	cipherText, e_rr := aesEncryption(m.nodeAesKey, jsonres)
+	handleError(e_rr, "")
+	encodedCipherText := encode(cipherText)
+
+	var sendMain parent
+	sendMain.TP = "INTERNAL"
+	sendMain.MD = "~~"
+	sendMain.CJ = encodedCipherText
+
+	sendMainJson, err := json.Marshal(sendMain)
+	handleError(err, "")
+
+	var encodedSendMainJson string = encode(sendMainJson)
+
+	encodedSendMainJsonLen := strconv.Itoa(len(encodedSendMainJson))
+
+	encodedCipherText = encodedSendMainJson + "." + encodedSendMainJsonLen + "." + "~|||~"
+	_, err_ := m.con.Write([]byte(encodedCipherText + "\n"))
+	handleError(err_, "Error while sending the close request to the Engine")
 }
 
-// It start the server and it should be called at end of the program
-// means it should be called when you are assured that all the pre-
-// requirements are being setup and server is ready to run.
-// It is blocking in nature that means it will force the server
-// to run forever.
-func (m *MAIN) Run() {
-	fmt.Println("[ Process ID: ", os.Getpid(), " ]")
-	fmt.Println("shiSock engine is Started on: {", m.server.Saddress, ":", m.server.Sport, "}")
-
-	for {
-
+func (m *MAIN) IsClosed(name string) int {
+	// function for checking whether that the connection between the client and engine has been closed.
+	var n int = m.CCDB[name]
+	if n == 1 {
+		return 1
+	} else if n == 0 {
+		return -1
+	} else {
+		return 0
 	}
 }
 
 // Reads data that is comming from Engine.
 // This function works along with the Listen fucntion.
 func (m *MAIN) handler() {
+
 	for {
 		if m.isAllSetup {
 			for {
@@ -451,6 +498,18 @@ func (m *MAIN) handler() {
 						}
 					}
 
+				} else if recvMain.TP == "INTERNAL" && recvMain.MD == "~~" {
+					var recvChildCipherText []byte = decode(recvMain.CJ)
+					recvChildJson, e := aesDecryption(m.nodeAesKey, recvChildCipherText)
+					handleError(e, "")
+
+					var recvChild Transport
+					e_rr := json.Unmarshal(recvChildJson, &recvChild)
+					handleError(e_rr, "")
+
+					if recvChild.Type == "CC" && recvChild.Data == "closedConnectionWithClient" {
+						m.CCDB[recvChild.Name] = 1
+					}
 				}
 			}
 		}
